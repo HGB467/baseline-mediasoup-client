@@ -25,7 +25,6 @@ const Room = () => {
   const videoProducerId = useRef()
   const audioProducerId2 = useRef()
   const videoProducerId2 = useRef()
-  const consumers = useRef(new Map())
   const localVideoCont = useRef()
   const localScreenCont = useRef()
   const screenShareStarted = useRef(false)
@@ -36,6 +35,8 @@ const Room = () => {
   const currentMicState = useRef(true)
   const currentVideoState = useRef(true)
   const audioPeersRef = useRef([])
+  const globalTimeout = useRef()
+  const consumers = useRef(new Map())
 
 
   useEffect(() => {
@@ -191,15 +192,15 @@ const Room = () => {
             {
               rid: "r1",
               scaleResolutionDownBy: 2,
-              maxBitrate: 1500000,
+              maxBitrate: 750000,
               scalabilityMode: 'L1T3'
             }
             , {
               rid: "r2",
               scaleResolutionDownBy: 1,
-              maxBitrate: 3500000,
+              maxBitrate: 1000000,
               scalabilityMode: 'L1T3'
-            }]
+            }],
         })
       }
 
@@ -243,10 +244,11 @@ const Room = () => {
 
   useEffect(() => {
     if (!socket) return;
-    socket.on('currentProducers', (producers) => {
-      producers?.forEach((producer) => {
-        startConsumeProducer(producer)
-      })
+    socket.on('currentProducers', async (producers) => {
+      for(let producer of producers){
+        const data = await startConsumeProducer(producer)
+        await consume(data)
+      }
     })
 
     return () => {
@@ -255,58 +257,53 @@ const Room = () => {
 
   }, [socket])
 
-  function startConsumeProducer(producer) {
-    socket.emit('createConsumeTransport', producer)
+  async function startConsumeProducer(producer) {
+    return new Promise((resolve,reject)=>{
+      socket.emit('createConsumeTransport', producer,(response)=>{
+        resolve(response)
+    })
+    })
   }
 
-  useEffect(() => {
-    if (!socket) return;
-    socket.on('ConsumeTransportCreated', async (data) => {
-      await consume(data)
-    })
-
-    return () => {
-      socket.off('ConsumeTransportCreated')
-    }
-
-  }, [socket])
 
   async function consume(data) {
-    receiveTransport.current[data?.storageId] = await mediasoupDevice.current?.createRecvTransport(data.data)
+    if(!receiveTransport.current?.[data?.storageId]){
+      receiveTransport.current[data?.storageId] = await mediasoupDevice.current?.createRecvTransport(data.data)
 
-    receiveTransport?.current[data?.storageId].on('connect', ({ dtlsParameters }, callback, errback) => {
-      socket.emit('transportConnect', { dtlsParameters, storageId: data?.storageId })
-      socket.on('consumerTransportConnected', (storageId) => {
-        if (storageId === data?.storageId) {
-          callback()
+      receiveTransport?.current[data?.storageId].on('connect', ({ dtlsParameters }, callback, errback) => {
+        socket.emit('transportConnect', { dtlsParameters, storageId: data?.storageId })
+        socket.on('consumerTransportConnected', (storageId) => {
+          if (storageId === data?.storageId) {
+            callback()
+          }
+        })
+      })
+  
+      receiveTransport?.current[data?.storageId].on("connectionstatechange", (state) => {
+        switch (state) {
+          case 'connecting':
+            console.log("Connecting To Stream!")
+            break;
+          case 'connected':
+            console.log("subscribed!")
+            break;
+          case 'failed':
+            console.log("Failed!")
+            socket.emit(
+              "consumerRestartIce",
+              data?.storageId,
+              async (params) => {
+                await receiveTransport?.current[data?.storageId]?.restartIce({
+                  iceParameters: params,
+                });
+              },
+            );
+            break;
+          default:
+            break;
         }
       })
-    })
-
-    receiveTransport?.current[data?.storageId].on("connectionstatechange", (state) => {
-      switch (state) {
-        case 'connecting':
-          console.log("Connecting To Stream!")
-          break;
-        case 'connected':
-          console.log("subscribed!")
-          break;
-        case 'failed':
-          console.log("Failed!")
-          socket.emit(
-            "consumerRestartIce",
-            data?.storageId,
-            async (params) => {
-              await receiveTransport?.current[data?.storageId]?.restartIce({
-                iceParameters: params,
-              });
-            },
-          );
-          break;
-        default:
-          break;
-      }
-    })
+    }
 
     socket.emit('startConsuming', { rtpCapabilities: mediasoupDevice?.current?.rtpCapabilities, storageId: data?.storageId, producerId: data?.producerId, socketId: data?.socketId, paused: false, screenShare: data?.screenShare })
   }
@@ -338,9 +335,9 @@ const Room = () => {
 
 
     const consumer = await receiveTransport?.current[data?.storageId].consume({ id, producerId, kind, rtpParameters, codecOptions })
-    consumers.current.set(data?.storageId, consumer)
     const mediaStream = new MediaStream()
     mediaStream.addTrack(consumer.track)
+    consumers.current.set(producerId,consumer)
     if (kind === 'video') {
       const idx = peersRef.current?.findIndex(
         (peer) => peer?.socketId === socketId && peer?.screenShare === false
@@ -374,7 +371,7 @@ const Room = () => {
       const audioElem = document.createElement('audio')
       audioElem.autoplay = true;
       audioElem.srcObject = mediaStream;
-      audioElem.id = data.storageId;
+      audioElem.id = `${data?.socketId}_${screenShare? 'screenaudio' : 'audio'}`;
       document.body.appendChild(audioElem)
       audioPeersRef.current = [...audioPeersRef.current, { socketId: socketId, storageId: storageId, mediaStream: mediaStream, consumer: consumer }]
     }
@@ -384,17 +381,19 @@ const Room = () => {
   useEffect(() => {
     if (!peers || peers?.length === 0) return;
     Object.keys(remoteStreamsRef.current).forEach((key) => {
-      const source = peersRef.current.find((peer) => peer?.storageId === key?.split('_')[0])?.mediaStream;
+      const source = peersRef.current.find((peer) => `${peer?.socketId}_${peer?.screenShare ? 'screenvideo' : 'video'}` === key)?.mediaStream;
+      console.log(source,'source',peersRef.current,key)
       remoteStreamsRef.current[key].srcObject = source;
-
     })
 
   }, [peers])
 
   useEffect(() => {
     if (!socket) return;
-    socket.on('newProducer', (producer) => {
-      startConsumeProducer(producer)
+    socket.on('newProducer', async (producer) => {
+      const data = await startConsumeProducer(producer)
+      console.log(data,'data')
+      await consume(data)
     })
 
     return () => {
@@ -449,26 +448,6 @@ const Room = () => {
         videoProducer2.current = await produceTransport.current?.produce(
           {
             track: Videotracks,
-            encodings: [
-              {
-                rid: "r0",
-                scaleResolutionDownBy: 4,
-                maxBitrate: 500000,
-                scalabilityMode: 'L1T3'
-              }
-              ,
-              {
-                rid: "r1",
-                scaleResolutionDownBy: 2,
-                maxBitrate: 1500000,
-                scalabilityMode: 'L1T3'
-              }
-              , {
-                rid: "r2",
-                scaleResolutionDownBy: 1,
-                maxBitrate: 3500000,
-                scalabilityMode: 'L1T3'
-              }],
             appData: {
               type: 'screen'
             }
@@ -484,26 +463,24 @@ const Room = () => {
 
   useEffect(() => {
     if (!socket) return;
-    socket.on('closeConsumer', async (storageId) => {
-      console.log('close consumer', storageId)
-      await receiveTransport.current[storageId]?.close()
-      receiveTransport.current[storageId] = null;
-      consumers.current.delete(storageId)
-      const idx = peersRef.current?.findIndex((item) => item?.storageId === storageId)
+    socket.on('closeConsumer', async ({socketId,screenShare,producerId}) => {
+      const consumer = consumers.current.get(producerId)
+      await consumer?.close()
+      consumers.current.delete(producerId)
+      const idx = peersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
       if (idx !== -1) {
         if (peersRef.current[idx]?.screenShare === false) {
-          remoteStreamsRef.current[`${storageId}_video`].srcObject = null;
+          remoteStreamsRef.current[`${socketId}_video`].srcObject = null;
         }
         else {
           peersRef.current?.splice(idx, 1)
           setPeers([...peersRef.current])
         }
-
       }
-      if (document.getElementById(storageId)) {
-        document.body.removeChild(document.getElementById(storageId))
-        const audioPeersFilter = audioPeersRef.current?.filter((item) => item?.storageId !== storageId)
-        audioPeersRef.current = audioPeersFilter;
+      if (document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`)) {
+        document.body.removeChild(document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`))
+        const audioPeersIdx = audioPeersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
+        audioPeersRef.current?.splice(audioPeersIdx, 1)
       }
     })
     return () => {
@@ -732,9 +709,9 @@ const Room = () => {
           <video muted autoPlay playsInline width={640} height={480} ref={localScreenStreamElemRef} controls></video>
         </div>
         {peers?.length > 0 && peers.map((peer, idx) =>
-          <div key={peer?.storageId} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', position: "relative" }}>
+          <div key={`${peer?.socketId}_${peer?.screenShare ? 'screenvideo' : 'video'}`} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', position: "relative" }}>
             <h1>Remote Stream {idx + 1}</h1>
-            <video autoPlay playsInline width={640} height={480} ref={a => a ? remoteStreamsRef.current[`${peer?.storageId}_video`] = a : ''} controls></video>
+            <video autoPlay playsInline width={640} height={480} ref={a => a ? remoteStreamsRef.current[`${peer?.socketId}_${peer?.screenShare ? 'screenvideo' : 'video'}`] = a : ''} controls></video>
             <div style={{ position: "absolute", top: "16%", right: "3%" }} id={peer?.socketId} className="audio-icon-cont">
               <span className="audio-icon" />
               <span className="audio-icon" />
