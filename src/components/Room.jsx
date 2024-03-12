@@ -40,7 +40,7 @@ const Room = () => {
 
 
   useEffect(() => {
-    const socket = io('http://localhost:5001');
+    const socket = io('http://192.168.18.72:5001');
     socketRef.current = socket
     setSocket(socket)
 
