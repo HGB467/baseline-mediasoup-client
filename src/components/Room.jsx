@@ -38,9 +38,13 @@ const Room = () => {
   const globalTimeout = useRef()
   const consumers = useRef(new Map())
 
+  useEffect(()=>{
+    localStorage.setItem('debug', '* -engine* -socket* -RIE* *WARN* *ERROR*');
+  },[])
+
 
   useEffect(() => {
-    const socket = io('http://192.168.18.72:5001');
+    const socket = io('http://localhost:5001');
     socketRef.current = socket
     setSocket(socket)
 
@@ -303,9 +307,10 @@ const Room = () => {
             break;
         }
       })
+
     }
 
-    socket.emit('startConsuming', { rtpCapabilities: mediasoupDevice?.current?.rtpCapabilities, storageId: data?.storageId, producerId: data?.producerId, socketId: data?.socketId, paused: false, screenShare: data?.screenShare })
+    socket.emit('startConsuming', { rtpCapabilities: mediasoupDevice?.current?.rtpCapabilities, storageId: data?.storageId, producerId: data?.producerId, socketId: data?.socketId, paused: true, screenShare: data?.screenShare })
   }
 
   useEffect(() => {
@@ -335,6 +340,10 @@ const Room = () => {
 
 
     const consumer = await receiveTransport?.current[data?.storageId].consume({ id, producerId, kind, rtpParameters, codecOptions })
+
+
+    socket.emit('resumeConsumer',id)
+
     const mediaStream = new MediaStream()
     mediaStream.addTrack(consumer.track)
     consumers.current.set(producerId,consumer)
@@ -463,25 +472,30 @@ const Room = () => {
 
   useEffect(() => {
     if (!socket) return;
-    socket.on('closeConsumer', async ({socketId,screenShare,producerId}) => {
+    socket.on('closeConsumer', async ({socketId,screenShare,producerId,kind}) => {
       const consumer = consumers.current.get(producerId)
       await consumer?.close()
       consumers.current.delete(producerId)
-      const idx = peersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
-      if (idx !== -1) {
-        if (peersRef.current[idx]?.screenShare === false) {
-          remoteStreamsRef.current[`${socketId}_video`].srcObject = null;
-        }
-        else {
-          peersRef.current?.splice(idx, 1)
-          setPeers([...peersRef.current])
+      if(kind === "video"){
+        const idx = peersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
+        if (idx !== -1) {
+          if (peersRef.current[idx]?.screenShare === false) {
+            remoteStreamsRef.current[`${socketId}_video`].srcObject = null;
+          }
+          else {
+            peersRef.current?.splice(idx, 1)
+            setPeers([...peersRef.current])
+          }
         }
       }
-      if (document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`)) {
-        document.body.removeChild(document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`))
-        const audioPeersIdx = audioPeersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
-        audioPeersRef.current?.splice(audioPeersIdx, 1)
+      else{
+        if (document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`)) {
+          document.body.removeChild(document.getElementById(`${socketId}_${screenShare? 'screenaudio' : 'audio'}`))
+          const audioPeersIdx = audioPeersRef.current?.findIndex((item) => item?.socketId === socketId && item?.screenShare === screenShare)
+          audioPeersRef.current?.splice(audioPeersIdx, 1)
+        }
       }
+
     })
     return () => {
       socket.off('closeConsumer')
@@ -574,19 +588,19 @@ const Room = () => {
   }
 
 
-  useEffect(() => {
-    window.onbeforeunload = async () => {
-      await socketRef.current?.disconnect()
-      localStreamRef.current?.getTracks()?.forEach((track) => {
-        track?.stop()
-      })
-      await produceTransport.current?.close()
-      Object.keys(receiveTransport.current)?.forEach((key) => {
-        receiveTransport.current[key]?.close()
-      })
-    }
+  // useEffect(() => {
+  //   window.onbeforeunload = async () => {
+  //     await socketRef.current?.disconnect()
+  //     localStreamRef.current?.getTracks()?.forEach((track) => {
+  //       track?.stop()
+  //     })
+  //     await produceTransport.current?.close()
+  //     Object.keys(receiveTransport.current)?.forEach((key) => {
+  //       receiveTransport.current[key]?.close()
+  //     })
+  //   }
 
-  }, [])
+  // }, [])
 
   useEffect(() => {
     if (!socket) return;
